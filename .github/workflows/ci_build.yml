@@ -34,10 +34,10 @@ jobs:
         run: yes | sdkmanager --licenses
 
       - name: Gradle wrapper permission
-        run: chmod +x ./gradlew
+        run: chmod +x gradlew
 
       - name: Build debug APK
-        run: ./gradlew assembleDebug --stacktrace --no-daemon
+        run: gradlew assembleDebug --stacktrace --no-daemon
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
