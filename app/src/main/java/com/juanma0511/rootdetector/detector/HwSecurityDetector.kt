@@ -6,9 +6,10 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
-import com.juanma0511.rootdetector.model.*
+import com.juanma0511.rootdetector.model.CheckStatus
+import com.juanma0511.rootdetector.model.HwCheckItem
+import com.juanma0511.rootdetector.model.HwGroup
 import java.io.BufferedReader
-import java.io.File
 import java.io.InputStreamReader
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
@@ -18,25 +19,49 @@ import javax.security.auth.x500.X500Principal
 class HwSecurityDetector(private val context: Context) {
 
     fun runAllChecks(progressCallback: (Int) -> Unit = {}): List<HwCheckItem> {
+        val checks = mutableListOf<() -> HwCheckItem>(
+            ::checkTeeAvailability,
+            ::checkKeystoreBacking,
+            ::checkStrongBox,
+            ::checkStrongBoxKey,
+            ::checkVerifiedBootState,
+            ::checkVerifiedBootKey,
+            ::checkBootloaderState,
+            ::checkDmVerity,
+            ::checkVbmetaDigest,
+            ::checkAvbVersion,
+            ::checkEncryptionState,
+            ::checkSecurityPatchLevel
+        )
+        if (isSamsungDevice()) {
+            checks += ::checkSamsungKnox
+        }
+
         val items = mutableListOf<HwCheckItem>()
-        val total = 12
+        val total = checks.size.coerceAtLeast(1)
         var done = 0
         fun tick() { done++; progressCallback((done * 100) / total) }
 
-        items += checkTeeAvailability().also { tick() }
-        items += checkKeystoreBacking().also { tick() }
-        items += checkStrongBox().also { tick() }
-        items += checkStrongBoxKey().also { tick() }
-        items += checkVerifiedBootState().also { tick() }
-        items += checkVerifiedBootKey().also { tick() }
-        items += checkBootloaderState().also { tick() }
-        items += checkDmVerity().also { tick() }
-        items += checkVbmetaDigest().also { tick() }
-        items += checkAvbVersion().also { tick() }
-        items += checkEncryptionState().also { tick() }
-        items += checkSecurityPatchLevel().also { tick() }
+        checks.forEach { check ->
+            items += check().also { tick() }
+        }
 
         return items
+    }
+
+    private fun isBootStateCompromised(): Boolean {
+        val flashLocked = getProp("ro.boot.flash.locked").lowercase()
+        val vbmetaState = getProp("ro.boot.vbmeta.device_state").lowercase()
+        val verifiedBoot = getProp("ro.boot.verifiedbootstate").lowercase()
+        val verityMode = getProp("ro.boot.veritymode").lowercase()
+        val vbmetaDigest = getProp("ro.boot.vbmeta.digest").lowercase()
+        val bootKey = getProp("ro.boot.bootkey").lowercase()
+        val unlocked = flashLocked == "0" || vbmetaState == "unlocked"
+        val badVerifiedBoot = verifiedBoot == "orange" || verifiedBoot == "red"
+        val badVerity = verityMode == "disabled" || verityMode == "logging"
+        val zeroDigest = vbmetaDigest.isNotEmpty() && vbmetaDigest != "unknown" && vbmetaDigest.all { it == '0' || it == ':' || it == '-' }
+        val zeroBootKey = bootKey.isNotEmpty() && bootKey != "unknown" && bootKey.all { it == '0' || it == ':' || it == '-' }
+        return unlocked || badVerifiedBoot || badVerity || zeroDigest || zeroBootKey
     }
 
     private fun checkTeeAvailability(): HwCheckItem {
@@ -64,15 +89,31 @@ class HwSecurityDetector(private val context: Context) {
 
             @Suppress("DEPRECATION")
             val inTee = keyInfo?.isInsideSecureHardware ?: false
+            val compromisedBoot = isBootStateCompromised()
+            val status = when {
+                inTee && !compromisedBoot -> CheckStatus.PASS
+                inTee -> CheckStatus.WARN
+                !compromisedBoot -> CheckStatus.UNKNOWN
+                else -> CheckStatus.WARN
+            }
+
             HwCheckItem(
                 id = "tee_available",
                 name = "TEE (Trusted Execution Env.)",
                 group = HwGroup.KEYSTORE,
                 description = "Checks if keys can be backed by a hardware TEE",
-                status = if (inTee) CheckStatus.PASS else CheckStatus.WARN,
-                value = if (inTee) "Hardware-backed" else "Software-only",
-                expected = "Hardware-backed",
-                detail = if (!inTee) "Key is in software keystore — no TEE present or accessible" else null
+                status = status,
+                value = when {
+                    inTee -> "Hardware-backed"
+                    else -> "Software-only"
+                },
+                expected = "Hardware-backed preferred",
+                detail = when {
+                    inTee && compromisedBoot -> "Secure hardware exists, but direct boot-state properties still show compromise."
+                    !inTee && !compromisedBoot -> "No hardware-backed TEE was exposed for this probe. This can be normal on some devices and should not be treated as a failure by itself."
+                    !inTee && compromisedBoot -> "No hardware-backed TEE was exposed and boot-state properties look compromised."
+                    else -> null
+                }
             )
         } catch (e: Exception) {
             HwCheckItem(
@@ -114,7 +155,6 @@ class HwSecurityDetector(private val context: Context) {
 
             @Suppress("DEPRECATION")
             val hwBacked = keyInfo?.isInsideSecureHardware == true
-
             val secLevelLabel = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && keyInfo != null) {
                 when (keyInfo.securityLevel) {
                     1 -> "SOFTWARE"
@@ -125,17 +165,29 @@ class HwSecurityDetector(private val context: Context) {
             } else {
                 if (hwBacked) "Hardware (TEE)" else "Software"
             }
-
-            val pass = hwBacked || secLevelLabel.contains("TEE") || secLevelLabel.contains("STRONGBOX")
+            val secureLevel = hwBacked || secLevelLabel.contains("TEE") || secLevelLabel.contains("STRONGBOX")
+            val compromisedBoot = isBootStateCompromised()
+            val status = when {
+                secureLevel && !compromisedBoot -> CheckStatus.PASS
+                secureLevel -> CheckStatus.WARN
+                !compromisedBoot -> CheckStatus.UNKNOWN
+                else -> CheckStatus.WARN
+            }
 
             HwCheckItem(
                 id = "keystore_backing",
                 name = "Keystore Security Level",
                 group = HwGroup.KEYSTORE,
-                description = "Reports the security level of the Android Keystore",
-                status = if (pass) CheckStatus.PASS else CheckStatus.WARN,
+                description = "Reports the Android Keystore security level",
+                status = status,
                 value = secLevelLabel,
-                expected = "TEE or StrongBox"
+                expected = "TEE or StrongBox preferred",
+                detail = when {
+                    secureLevel && compromisedBoot -> "Secure keystore exists, but direct boot-state properties still look compromised."
+                    !secureLevel && !compromisedBoot -> "Software keystore is exposed. This is weaker than TEE or StrongBox, but it can still be normal on some locked devices."
+                    !secureLevel && compromisedBoot -> "Software keystore is exposed and direct boot-state properties look compromised."
+                    else -> null
+                }
             )
         } catch (e: Exception) {
             HwCheckItem(
@@ -256,20 +308,19 @@ class HwSecurityDetector(private val context: Context) {
         val key = getProp("ro.boot.vbmeta.digest")
             .ifEmpty { getProp("ro.boot.bootkey") }
             .ifEmpty { "unknown" }
-        val isZero = key == "0" || key.all { it == '0' } || key == "unknown"
+        val invalidKey = key == "unknown" || key == "0" || key.all { it == '0' }
         return HwCheckItem(
             id = "verified_boot_key",
             name = "Verified Boot Key / Digest",
             group = HwGroup.BOOT,
-            description = "ro.boot.vbmeta.digest — all-zeros means unlocked/custom key",
-            status = when {
-                isZero && key != "unknown" -> CheckStatus.FAIL
-                key == "unknown" -> CheckStatus.UNKNOWN
-                else -> CheckStatus.PASS
-            },
+            description = "ro.boot.vbmeta.digest and ro.boot.bootkey should not be unknown or all-zero on a healthy verified boot chain",
+            status = if (invalidKey) CheckStatus.FAIL else CheckStatus.PASS,
             value = if (key.length > 32) key.take(16) + "…" + key.takeLast(8) else key,
-            expected = "Non-zero OEM digest",
-            detail = if (isZero && key != "unknown") "Boot key is all zeros — bootloader unlocked or custom key" else null
+            expected = "Known non-zero OEM digest",
+            detail = when {
+                key == "unknown" -> "Verified boot key or digest is unknown — hardware boot attestation is not trustworthy"
+                else -> "Boot key or digest is all zeros — bootloader unlocked, bypassed or custom key likely"
+            }.takeIf { invalidKey }
         )
     }
 
@@ -324,20 +375,19 @@ class HwSecurityDetector(private val context: Context) {
     private fun checkVbmetaDigest(): HwCheckItem {
         val digest = getProp("ro.boot.vbmeta.digest").ifEmpty { "unknown" }
         val avbSize = getProp("ro.boot.vbmeta.size").ifEmpty { "?" }
-        val isZero = digest == "unknown" || digest.all { it == '0' }
+        val invalidDigest = digest == "unknown" || digest.all { it == '0' }
         return HwCheckItem(
             id = "vbmeta_digest",
             name = "VBMeta Digest (AVB)",
             group = HwGroup.VBMETA,
-            description = "SHA-256 of vbmeta partition — all zeros = unlocked or modified",
-            status = when {
-                isZero && digest != "unknown" -> CheckStatus.FAIL
-                digest == "unknown" -> CheckStatus.UNKNOWN
-                else -> CheckStatus.PASS
-            },
+            description = "SHA-256 of vbmeta partition should not be unknown or all-zero on a healthy AVB chain",
+            status = if (invalidDigest) CheckStatus.FAIL else CheckStatus.PASS,
             value = if (digest.length > 32) "${digest.take(12)}…${digest.takeLast(8)} (${avbSize}B)" else digest,
-            expected = "Non-zero AVB digest",
-            detail = if (isZero && digest != "unknown") "All-zero VBMeta digest — boot verification bypassed" else null
+            expected = "Known non-zero AVB digest",
+            detail = when {
+                digest == "unknown" -> "VBMeta digest is unknown — verified boot metadata could not be trusted"
+                else -> "All-zero VBMeta digest — boot verification bypassed"
+            }.takeIf { invalidDigest }
         )
     }
 
@@ -398,6 +448,75 @@ class HwSecurityDetector(private val context: Context) {
             expected = "Within last 12 months",
             detail = if (!ok) "Patch older than 12 months — may be vulnerable to known CVEs" else null
         )
+    }
+
+    private fun checkSamsungKnox(): HwCheckItem {
+        val warrantyBit = getProp("ro.boot.warranty_bit")
+            .ifEmpty { getProp("ro.warranty_bit") }
+            .ifEmpty { "unknown" }
+        val knoxVersion = getProp("ro.config.knox")
+            .ifEmpty { getProp("ro.config.knox2") }
+            .ifEmpty { getProp("ro.config.timaversion") }
+        val kgState = getProp("ro.boot.kg.state")
+            .ifEmpty { getProp("sys.knox.kg.state") }
+        val hasKnoxPackage = listOf(
+            "com.samsung.android.knox.containercore",
+            "com.samsung.android.knox.attestation",
+            "com.samsung.android.knox.kpecore",
+            "com.samsung.klmsagent"
+        ).any { packageName ->
+            try {
+                context.packageManager.getPackageInfo(packageName, 0)
+                true
+            } catch (_: Exception) {
+                false
+            }
+        }
+
+        val status = when {
+            warrantyBit == "1" -> CheckStatus.FAIL
+            warrantyBit == "0" && (knoxVersion.isNotEmpty() || hasKnoxPackage) -> CheckStatus.PASS
+            knoxVersion.isNotEmpty() || hasKnoxPackage || kgState.isNotEmpty() -> CheckStatus.WARN
+            else -> CheckStatus.UNKNOWN
+        }
+
+        val value = when {
+            warrantyBit == "1" -> "Warranty bit tripped (0x1)"
+            warrantyBit == "0" -> "Warranty bit intact (0x0)"
+            else -> "Knox state not fully exposed"
+        }
+
+        val detail = buildString {
+            if (knoxVersion.isNotEmpty()) append("Knox version: $knoxVersion")
+            if (kgState.isNotEmpty()) {
+                if (isNotEmpty()) append("\n")
+                append("KG state: $kgState")
+            }
+            if (hasKnoxPackage) {
+                if (isNotEmpty()) append("\n")
+                append("Samsung Knox framework packages detected")
+            }
+            if (warrantyBit == "1") {
+                if (isNotEmpty()) append("\n")
+                append("Samsung Knox warranty bit is tripped")
+            }
+        }.ifEmpty { null }
+
+        return HwCheckItem(
+            id = "samsung_knox",
+            name = "Samsung Knox State",
+            group = HwGroup.KNOX,
+            description = "Samsung-only Knox warranty and framework state",
+            status = status,
+            value = value,
+            expected = "Warranty bit intact (0x0)",
+            detail = detail
+        )
+    }
+
+    private fun isSamsungDevice(): Boolean {
+        return Build.MANUFACTURER.equals("samsung", ignoreCase = true) ||
+            Build.BRAND.equals("samsung", ignoreCase = true)
     }
 
     private fun getProp(key: String): String = try {

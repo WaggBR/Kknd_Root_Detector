@@ -24,7 +24,7 @@ data class NavItem(
 )
 
 val navItems = listOf(
-    NavItem("Root Check",   Icons.Filled.Security,  Icons.Outlined.Security),
+    NavItem("Root Scan",    Icons.Filled.Security,  Icons.Outlined.Security),
     NavItem("HW Security",  Icons.Filled.Hardware,  Icons.Outlined.Hardware),
     NavItem("Settings",     Icons.Filled.Settings,  Icons.Outlined.Settings)
 )
@@ -70,7 +70,7 @@ fun MainShell(
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
 
-    val titles = listOf("Root Detector", "Hardware Security", "Settings")
+    val titles = listOf("kknd Detector", "Hardware Security", "Settings")
 
     Scaffold(
         topBar = {

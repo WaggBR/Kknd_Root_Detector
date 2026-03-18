@@ -356,6 +356,7 @@ private fun groupLabel(group: HwGroup) = when (group) {
     HwGroup.KEYSTORE     -> "Keystore / TEE / StrongBox"
     HwGroup.BOOT         -> "Verified Boot"
     HwGroup.VBMETA       -> "VBMeta / AVB"
+    HwGroup.KNOX         -> "Samsung Knox"
     HwGroup.SYSTEM_PROPS -> "System Properties"
 }
 
@@ -363,5 +364,6 @@ private fun groupIcon(group: HwGroup): androidx.compose.ui.graphics.vector.Image
     HwGroup.KEYSTORE     -> Icons.Outlined.Key
     HwGroup.BOOT         -> Icons.Outlined.VerifiedUser
     HwGroup.VBMETA       -> Icons.Outlined.Security
+    HwGroup.KNOX         -> Icons.Outlined.Security
     HwGroup.SYSTEM_PROPS -> Icons.Outlined.Settings
 }

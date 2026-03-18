@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <set>
+#include <map>
 #include <sstream>
 #include <fstream>
 #include <sys/stat.h>
@@ -80,6 +81,45 @@ static bool contains_ci(const std::string& h, const char* n) {
     for (auto& c : lh) c = tolower(c);
     for (auto& c : ln) c = tolower(c);
     return lh.find(ln) != std::string::npos;
+}
+
+static std::vector<std::string> read_nul_file(const char* path) {
+    std::vector<std::string> entries;
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return entries;
+    char buf[8192]{};
+    ssize_t len = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (len <= 0) return entries;
+    size_t start = 0;
+    for (ssize_t i = 0; i < len; i++) {
+        if (buf[i] == '\0') {
+            if ((size_t)i > start) entries.emplace_back(buf + start, (size_t)i - start);
+            start = (size_t)i + 1;
+        }
+    }
+    if (start < (size_t)len) entries.emplace_back(buf + start, (size_t)len - start);
+    return entries;
+}
+
+static pid_t find_pid_by_cmd_fragment(const char* needle) {
+    DIR* dir = opendir("/proc");
+    if (!dir) return -1;
+    struct dirent* ent;
+    while ((ent = readdir(dir)) != nullptr) {
+        char* end;
+        long pid = strtol(ent->d_name, &end, 10);
+        if (*end) continue;
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%ld/cmdline", pid);
+        std::string cmd = fread_str(path);
+        if (!cmd.empty() && contains_ci(cmd, needle)) {
+            closedir(dir);
+            return (pid_t)pid;
+        }
+    }
+    closedir(dir);
+    return -1;
 }
 
 static void detectKernelsu() {
@@ -509,13 +549,49 @@ static void detectResetprop() {
             return;
         }
     }
-    char sys_tags[256]{};
-    __system_property_get("ro.build.tags", sys_tags);
-    std::string file_tags = prop_from_file("/system/build.prop", "ro.build.tags");
-    if (!file_tags.empty() && file_tags.back() == '\n') file_tags.pop_back();
-    if (!file_tags.empty() && strcmp(sys_tags, file_tags.c_str()) != 0)
-        add("resetprop_mismatch", "Build Prop Mismatch (resetprop)",
-            std::string("ro.build.tags system=['") + sys_tags + "'] file=['" + file_tags + "']");
+    struct PropCheck { const char* key; const char* file; } checks[] = {
+        {"ro.build.tags", "/system/build.prop"},
+        {"ro.build.tags", "/system/system/build.prop"},
+        {"ro.build.fingerprint", "/system/build.prop"},
+        {"ro.build.fingerprint", "/system/system/build.prop"},
+        {"ro.vendor.build.fingerprint", "/vendor/build.prop"},
+        {"ro.product.build.fingerprint", "/product/build.prop"},
+        {"ro.product.device", "/system/build.prop"},
+        {"ro.product.device", "/product/build.prop"},
+        {"ro.debuggable", "/system/build.prop"},
+        {"ro.secure", "/system/build.prop"},
+        {"ro.build.type", "/system/build.prop"},
+        {"ro.build.type", "/system/system/build.prop"},
+        {"ro.boot.vbmeta.device_state", "/default.prop"},
+        {"ro.boot.flash.locked", "/default.prop"},
+        {"ro.boot.verifiedbootstate", "/default.prop"},
+        {"ro.boot.vbmeta.device_state", "/vendor/default.prop"},
+        {"ro.boot.flash.locked", "/vendor/default.prop"},
+        {"ro.boot.verifiedbootstate", "/vendor/default.prop"},
+        {nullptr, nullptr}
+    };
+    std::vector<std::string> mismatches;
+    for (int i = 0; checks[i].key; i++) {
+        char live[256]{};
+        if (__system_property_get(checks[i].key, live) <= 0) continue;
+        std::string file_val = prop_from_file(checks[i].file, checks[i].key);
+        if (!file_val.empty() && file_val.back() == '\n') file_val.pop_back();
+        if (!file_val.empty() && strcmp(live, file_val.c_str()) != 0) {
+            mismatches.push_back(std::string(checks[i].key) + " system=['" + live + "'] file=['" + file_val + "']");
+        }
+    }
+    char serial_live[256]{};
+    char serial_boot[256]{};
+    if (__system_property_get("ro.serialno", serial_live) > 0 &&
+        __system_property_get("ro.boot.serialno", serial_boot) > 0 &&
+        strcmp(serial_live, serial_boot) != 0) {
+        mismatches.push_back(std::string("serial mismatch: ro.serialno=['") + serial_live + "'] ro.boot.serialno=['" + serial_boot + "']");
+    }
+    if (!mismatches.empty()) {
+        std::string detail = "resetprop/property mismatches:";
+        for (size_t i = 0; i < mismatches.size() && i < 4; i++) detail += " [" + mismatches[i] + "]";
+        add("resetprop_mismatch", "Build Prop Mismatch (resetprop)", detail);
+    }
 }
 
 static void detectLspHook() {
@@ -1007,7 +1083,7 @@ static void detectMagicMount() {
         if (skip) continue;
         magic_count++;
     }
-    if (magic_count > 3) {
+    if (magic_count > 1) {
         char buf[80];
         snprintf(buf, sizeof(buf), "%d magic-mounted paths in system partitions", magic_count);
         add("magic_mount", "Magisk Magic Mount Detected", buf);
@@ -1068,6 +1144,165 @@ static void detectProc1MountDiff() {
         for (size_t i = 0; i < suspicious.size() && i < 3; i++) d += " [" + suspicious[i] + "]";
         add("proc1_mount_diff", "Mount Namespace Divergence",
             d + " — Magisk namespaces mounts to hide from init");
+    }
+}
+
+static void detectMountConsistency() {
+    auto read_mounts = [](const char* path) {
+        std::map<std::string, std::pair<std::string, std::string>> result;
+        std::ifstream f(path);
+        std::string line;
+        while (std::getline(f, line)) {
+            std::istringstream iss(line);
+            std::string dev, mp, fs;
+            iss >> dev >> mp >> fs;
+            if (!mp.empty()) result[mp] = {dev, fs};
+        }
+        return result;
+    };
+
+    auto is_sensitive = [](const std::string& mp) {
+        const char* prefixes[] = {
+            "/system", "/vendor", "/product", "/odm",
+            "/system_ext", "/debug_ramdisk", "/.magisk",
+            "/data/adb", "/sbin", nullptr
+        };
+        for (int i = 0; prefixes[i]; i++) {
+            const std::string prefix = prefixes[i];
+            if (mp == prefix || mp.find(prefix + "/") == 0) return true;
+        }
+        return false;
+    };
+
+    auto self_mounts = read_mounts("/proc/self/mounts");
+    auto init_mounts = read_mounts("/proc/1/mounts");
+    if (self_mounts.empty() || init_mounts.empty()) return;
+
+    std::vector<std::string> details;
+    for (const auto& entry : self_mounts) {
+        const std::string& mp = entry.first;
+        if (!is_sensitive(mp)) continue;
+        const auto& self_pair = entry.second;
+        auto it = init_mounts.find(mp);
+        if (it == init_mounts.end()) {
+            details.push_back(mp + " self-only=" + self_pair.first + ":" + self_pair.second);
+            continue;
+        }
+        if (self_pair != it->second) {
+            details.push_back(
+                mp + " self=" + self_pair.first + ":" + self_pair.second +
+                " init=" + it->second.first + ":" + it->second.second
+            );
+        }
+    }
+
+    if (!details.empty()) {
+        std::string d = "Mount consistency mismatch (" + std::to_string(details.size()) + "):";
+        for (size_t i = 0; i < details.size() && i < 4; i++) d += " [" + details[i] + "]";
+        add("mount_consistency", "Mount Consistency Failure", d);
+    }
+}
+
+static void detectZygoteEnvironment() {
+    auto is_suspicious = [](const std::string& value) {
+        return contains_ci(value, "magisk") ||
+               contains_ci(value, "zygisk") ||
+               contains_ci(value, "riru") ||
+               contains_ci(value, "lsposed") ||
+               contains_ci(value, "xposed") ||
+               contains_ci(value, "edxp") ||
+               contains_ci(value, "kernelsu") ||
+               contains_ci(value, "ksu") ||
+               contains_ci(value, "apatch") ||
+               contains_ci(value, "frida") ||
+               contains_ci(value, "dobby") ||
+               contains_ci(value, "shadowhook") ||
+               contains_ci(value, "sandhook");
+    };
+
+    std::vector<std::string> hits;
+    for (const auto& entry : read_nul_file("/proc/self/environ")) {
+        if (is_suspicious(entry)) hits.push_back("self:" + entry.substr(0, 80));
+    }
+
+    const char* vars[] = {
+        "CLASSPATH", "LD_PRELOAD", "LD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES", "LD_AUDIT", "PATH", nullptr
+    };
+    for (int i = 0; vars[i]; i++) {
+        const char* value = getenv(vars[i]);
+        if (!value || !*value) continue;
+        std::string entry = std::string(vars[i]) + "=" + value;
+        if (is_suspicious(entry)) hits.push_back(entry.substr(0, 90));
+    }
+
+    pid_t zygote_pid = find_pid_by_cmd_fragment("zygote");
+    if (zygote_pid > 0) {
+        char env_path[64]{};
+        snprintf(env_path, sizeof(env_path), "/proc/%d/environ", zygote_pid);
+        for (const auto& entry : read_nul_file(env_path)) {
+            if (is_suspicious(entry)) hits.push_back("zygote:" + entry.substr(0, 80));
+        }
+
+        char cmd_path[64]{};
+        snprintf(cmd_path, sizeof(cmd_path), "/proc/%d/cmdline", zygote_pid);
+        std::string cmd = fread_str(cmd_path);
+        if (!cmd.empty() && is_suspicious(cmd)) hits.push_back("zygote_cmd:" + cmd.substr(0, 80));
+    }
+
+    if (!hits.empty()) {
+        std::string d = "Injected environment traces:";
+        for (size_t i = 0; i < hits.size() && i < 4; i++) d += " [" + hits[i] + "]";
+        add("zygote_env", "Zygote/App Environment Injection", d);
+    }
+}
+
+static void detectMaliciousHook() {
+    const char* hook_libs[] = {
+        "libdobby.so", "libshadowhook.so", "libsandhook.so", "libxposed_art.so",
+        "liblsplant.so", "libsubstrate.so", "frida-gadget.so", "libfrida-gadget.so",
+        "libepic.so", "libinlinehook.so", nullptr
+    };
+    for (int i = 0; hook_libs[i]; i++) {
+        void* handle = dlopen(hook_libs[i], RTLD_NOLOAD | RTLD_NOW);
+        if (handle) {
+            dlclose(handle);
+            add("hook_lib_loaded", "Hook Library Loaded", std::string("Loaded: ") + hook_libs[i]);
+            return;
+        }
+    }
+
+    std::ifstream maps("/proc/self/maps");
+    if (maps) {
+        std::string line;
+        while (std::getline(maps, line)) {
+            if (!(contains_ci(line, "dobby") || contains_ci(line, "shadowhook") ||
+                  contains_ci(line, "sandhook") || contains_ci(line, "xposed") ||
+                  contains_ci(line, "lsposed") || contains_ci(line, "substrate") ||
+                  contains_ci(line, "frida") || contains_ci(line, "epic"))) {
+                continue;
+            }
+            size_t sp = line.rfind(' ');
+            std::string path = sp != std::string::npos ? line.substr(sp + 1) : line;
+            if (path.find("/system/") == 0 || path.find("/apex/") == 0 || path.find("/vendor/") == 0) continue;
+            add("hook_maps", "Hook Framework in Memory", path.substr(0, 90));
+            return;
+        }
+    }
+
+    const char* probe_names[] = {
+        "open", "dlopen", "__system_property_get", "ptrace", "kill", "prctl", nullptr
+    };
+    for (int i = 0; probe_names[i]; i++) {
+        void* sym = dlsym(RTLD_DEFAULT, probe_names[i]);
+        if (!sym) continue;
+        Dl_info info{};
+        if (!dladdr(sym, &info) || !info.dli_fname) continue;
+        std::string path = info.dli_fname;
+        if (path.find("/apex/") == 0 || path.find("/system/") == 0 || path.find("/vendor/") == 0) continue;
+        add("hook_origin", "Hooked Native API Source",
+            std::string(probe_names[i]) + " resolved from " + path.substr(0, 90));
+        return;
     }
 }
 
@@ -1461,6 +1696,9 @@ Java_com_juanma0511_rootdetector_detector_NativeChecks_runNativeChecks(JNIEnv* e
     detectFakeEnvironment();
     detectMagicMount();
     detectProc1MountDiff();
+    detectMountConsistency();
+    detectZygoteEnvironment();
+    detectMaliciousHook();
     detectInotify();
     detectSyscallTiming();
     detectKallsymsDeep();

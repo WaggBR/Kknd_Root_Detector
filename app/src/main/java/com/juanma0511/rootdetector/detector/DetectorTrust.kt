@@ -1,0 +1,139 @@
+package com.juanma0511.rootdetector.detector
+
+import java.io.File
+import java.util.concurrent.TimeUnit
+
+object DetectorTrust {
+
+    private val rootKeywords = listOf(
+        "magisk", "zygisk", "zygisknext", "zygiskassistant", "lsposed", "lspatch",
+        "riru", "xposed", "edxp", "kernelsu", "ksu", "ksunext", "apatch",
+        "shamiko", "susfs", "trickystore", "playintegrityfix", "integrityfix",
+        "safetynetfix", "hidemyapplist", "nohello", "frida", "frida-gadget"
+    )
+
+    private val rootPaths = listOf(
+        "/data/adb", "/debug_ramdisk", "/.magisk", "/sbin/.magisk",
+        "/data/adb/modules", "/data/adb/modules_update", "/data/adb/ksu",
+        "/data/adb/magisk", "/data/adb/ap", "/metadata/adb/modules", "/mnt/.magisk/modules"
+    )
+
+    fun frameworkKeywords(): List<String> = rootKeywords
+
+    fun getProp(key: String): String = try {
+        val process = Runtime.getRuntime().exec("getprop $key")
+        val finished = process.waitFor(1, TimeUnit.SECONDS)
+        if (!finished) {
+            process.destroyForcibly()
+            ""
+        } else {
+            process.inputStream.bufferedReader().readLine()?.trim().orEmpty()
+        }
+    } catch (_: Exception) {
+        ""
+    }
+
+    fun bootLooksTrustedLocked(): Boolean {
+        val flashLocked = getProp("ro.boot.flash.locked").lowercase()
+        val vbmetaState = getProp("ro.boot.vbmeta.device_state").lowercase()
+        val verifiedBoot = getProp("ro.boot.verifiedbootstate").lowercase()
+        val verityMode = getProp("ro.boot.veritymode").lowercase()
+        val vbmetaDigest = getProp("ro.boot.vbmeta.digest").lowercase()
+        val bootKey = getProp("ro.boot.bootkey").lowercase()
+        val locked = flashLocked == "1" || vbmetaState == "locked"
+        val greenBoot = verifiedBoot == "green" || (verifiedBoot.isEmpty() && locked)
+        val verityOk = verityMode.isEmpty() || verityMode == "enforcing" || verityMode == "eio"
+        val digestOk = vbmetaDigest.isEmpty() || vbmetaDigest == "unknown" || !isZeroLike(vbmetaDigest)
+        val bootKeyOk = bootKey.isEmpty() || bootKey == "unknown" || !isZeroLike(bootKey)
+        return locked && greenBoot && verityOk && digestOk && bootKeyOk && !hasExplicitRootArtifacts()
+    }
+
+    fun hasRootMountSignal(signature: String, mountPoint: String, trustedLocked: Boolean): Boolean {
+        val lower = ("$mountPoint $signature").lowercase()
+        val keywordHit = rootPaths.any { lower.contains(it) } || rootKeywords.any { lower.contains(it) }
+        if (keywordHit) return true
+        val systemPartition =
+            mountPoint.startsWith("/system") ||
+            mountPoint.startsWith("/system_ext") ||
+            mountPoint.startsWith("/vendor") ||
+            mountPoint.startsWith("/product") ||
+            mountPoint.startsWith("/odm")
+        val mountAbuse = (lower.contains("overlay") || lower.contains("tmpfs") || lower.contains("loop")) && systemPartition
+        return mountAbuse && !trustedLocked
+    }
+
+    fun isSuspiciousDeletedOrMemfdMap(line: String, trustedLocked: Boolean): Boolean {
+        val lower = line.lowercase()
+        val ignoredMarkers = listOf(
+            "jit-cache", "jit-zygote-cache", "[anon:dalvik", "[anon:art", "[anon:scudo",
+            "dmabuf", "ashmem", "font", "boot.oat", "system@framework", "app.dex", "base.odex"
+        )
+        if (ignoredMarkers.any { lower.contains(it) }) return false
+        val rootKeywordHit = rootKeywords.any { lower.contains(it) }
+        val rootPathHit = rootPaths.any { lower.contains(it) }
+        val deletedHit = lower.contains("(deleted)") && (rootKeywordHit || rootPathHit)
+        val memfdExec = lower.contains("memfd:") && (line.contains("r-xp") || line.contains("rwxp") || line.contains("r-xs"))
+        if (deletedHit) return true
+        if (memfdExec && (rootKeywordHit || rootPathHit)) return true
+        return memfdExec && !trustedLocked && lower.contains("frida")
+    }
+
+    fun isLikelyRuntimeInjectionEvidence(value: String, trustedLocked: Boolean): Boolean {
+        val lower = value.lowercase()
+        val strongKeywords = listOf(
+            "zygisk", "lsposed", "lspatch", "riru", "xposed", "edxp",
+            "shamiko", "trickystore", "playintegrityfix", "kernelsu", "apatch", "frida"
+        )
+        if (strongKeywords.any { lower.contains(it) }) return true
+        val genericHook = listOf("dobby", "shadowhook", "sandhook", "whale").any { lower.contains(it) }
+        if (!genericHook) return false
+        val rootedContext = rootPaths.any { lower.contains(it) } || lower.contains("memfd:") || lower.contains("(deleted)")
+        return rootedContext && !trustedLocked
+    }
+
+    private fun hasExplicitRootArtifacts(): Boolean {
+        if (rootPaths.any { path -> File(path).exists() }) return true
+
+        val moduleDirs = listOf("/data/adb/modules", "/data/adb/modules_update", "/metadata/adb/modules", "/mnt/.magisk/modules")
+        moduleDirs.forEach { dirPath ->
+            File(dirPath).listFiles()?.forEach { module ->
+                val name = module.name.lowercase()
+                if (rootKeywords.any { name.contains(it) }) return true
+                val propFile = File(module, "module.prop")
+                if (propFile.exists()) {
+                    val content = runCatching { propFile.readText().lowercase() }.getOrDefault("")
+                    if (rootKeywords.any { content.contains(it) }) return true
+                }
+            }
+        }
+
+        var mountHit = false
+        try {
+            File("/proc/mounts").forEachLine { line ->
+                val lower = line.lowercase()
+                if (rootPaths.any { lower.contains(it) } || rootKeywords.any { lower.contains(it) }) {
+                    mountHit = true
+                }
+            }
+        } catch (_: Exception) {}
+        if (mountHit) return true
+
+        var unixHit = false
+        try {
+            File("/proc/net/unix").forEachLine { line ->
+                val lower = line.lowercase()
+                if (rootKeywords.any { lower.contains(it) }) {
+                    unixHit = true
+                }
+            }
+        } catch (_: Exception) {}
+        if (unixHit) return true
+
+        return false
+    }
+
+    private fun isZeroLike(value: String): Boolean {
+        val normalized = value.filterNot { it == ':' || it == '-' || it.isWhitespace() }
+        return normalized.isNotEmpty() && normalized.all { it == '0' }
+    }
+}

@@ -14,9 +14,10 @@ data class HwCheckItem(
 )
 
 enum class HwGroup {
-    KEYSTORE,       
-    BOOT,           
-    VBMETA,         
+    KEYSTORE,
+    BOOT,
+    VBMETA,
+    KNOX,
     SYSTEM_PROPS
 }
 
