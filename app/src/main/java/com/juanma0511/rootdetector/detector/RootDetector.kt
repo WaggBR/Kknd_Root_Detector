@@ -43,8 +43,11 @@ class RootDetector(private val context: Context) {
         "de.robv.android.xposed.installer", "me.weishu.exp",
         "com.solohsu.android.edxp.manager", "org.meowcat.edxposed.manager",
         "com.fox2code.mmm", "com.fox2code.mmm.debug", "com.fox2code.mmm.fdroid",
+        "com.fox2code.mmm.minimal", "com.fox2code.mmm.oss",
         "com.dergoogler.mmrl", "com.devadvance.rootcloak",
         "com.devadvance.rootcloakplus", "com.chrisbjohnson.hiddenroot",
+        "io.github.huskydg.magisk.hide", "io.github.huskydg.magisk.modules",
+        "org.meowcat.mihomo", "com.tsng.hidemyapplist", "org.frknkrc44.hma_oss",
         "stericson.busybox", "stericson.busybox.donate",
         "com.dimonvideo.luckypatcher", "com.chelpus.lackypatch",
         "com.ramdroid.appquarantine",
@@ -64,7 +67,8 @@ class RootDetector(private val context: Context) {
         "com.solohsu.android.edxp.manager", "org.meowcat.edxposed.manager",
         "me.weishu.exp",
         "com.speedsoftware.rootexplorer", "com.estrongs.android.pop",
-        "com.fox2code.mmm", "com.dergoogler.mmrl"
+        "com.fox2code.mmm", "com.dergoogler.mmrl",
+        "rikka.safetynetchecker", "io.github.vvb2060.keyattestation"
     )
 
     private val warningApps = linkedMapOf(
@@ -85,15 +89,23 @@ class RootDetector(private val context: Context) {
         "/data/adb/ksud", "/data/adb/ksu/bin", "/data/adb/ap",
         "/data/adb/apd", "/data/adb/ap/bin", "/debug_ramdisk/.magisk",
         "/cache/.disable_magisk", "/system/addon.d/99-magisk.sh",
-        "/dev/.magisk.unblock", "/dev/magisk_merge", "/dev/ksud", "/dev/ksu", "/dev/apatch"
+        "/dev/.magisk.unblock", "/dev/magisk_merge", "/dev/ksud", "/dev/ksu", "/dev/apatch",
+        "/data/adb/tricky_store", "/data/adb/trickystore", "/data/adb/shamiko",
+        "/data/adb/lsposed", "/data/adb/riru", "/data/adb/modules/zygisk_lsposed",
+        "/data/adb/modules/playintegrityfix", "/data/adb/modules/tricky_store"
     )
 
-    private val dangerousBinaries = listOf("su", "busybox", "magisk", "magisk64", "magiskpolicy", "resetprop", "supolicy", "ksud", "ksuinit", "apd")
+    private val dangerousBinaries = listOf(
+        "su", "busybox", "magisk", "magisk64", "magiskpolicy", "resetprop", "supolicy",
+        "ksud", "ksuinit", "apd", "zygisk", "zygote64_zygisk", "zygote_zygisk",
+        "zygiskd", "magiskhide", "tricky_store", "susfs"
+    )
     private val binaryPaths = listOf(
         "/sbin/", "/system/bin/", "/system/xbin/", "/system_ext/bin/",
         "/system_ext/xbin/", "/product/bin/", "/vendor/bin/", "/vendor/xbin/",
         "/data/local/xbin/", "/data/local/bin/", "/data/local/tmp/", "/su/bin/",
-        "/debug_ramdisk/", "/data/adb/ksu/bin/"
+        "/debug_ramdisk/", "/data/adb/ksu/bin/", "/data/adb/ap/bin/",
+        "/data/adb/magisk/", "/data/adb/tricky_store/", "/data/adb/modules/"
     )
 
     fun runAllChecks(progressCallback: (Int) -> Unit = {}): List<DetectionItem> {
@@ -547,6 +559,7 @@ class RootDetector(private val context: Context) {
             "playintegrityfix" to "Play Integrity Fix",
             "pif" to "Play Integrity Fix",
             "tricky_store" to "TrickyStore",
+            "tricky-store" to "TrickyStore",
             "trickystore" to "TrickyStore",
             "hidemyapplist" to "Hide My Applist",
             "hma" to "Hide My Applist",
@@ -559,8 +572,14 @@ class RootDetector(private val context: Context) {
             "susfs" to "SUSFS",
             "ksu_susfs" to "KernelSU SUSFS",
             "safetynet-fix" to "SafetyNet Fix",
+            "safetynetfix" to "SafetyNet Fix",
             "magiskhidepropsconf" to "MagiskHide Props Config",
             "magical_overlayfs" to "Magical OverlayFS",
+            "magisk_overlayfs" to "Magisk OverlayFS",
+            "zygisknext" to "Zygisk Next",
+            "zygisk-detach" to "Zygisk Detach",
+            "resetprop" to "Resetprop helper",
+            "shamiko-whitelist" to "Shamiko helper",
             "riru" to "Riru",
             "denylist" to "DenyList helper"
         )
@@ -923,7 +942,7 @@ class RootDetector(private val context: Context) {
                 "overlayfs",
                 "OverlayFS System Modification",
                 DetectionCategory.MAGISK,
-                Severity.LOW,
+                Severity.MEDIUM,
                 "Detects overlay-backed system mounts, Magisk magic mount traces and /data/adb-backed overlays",
                 overlays.isNotEmpty(),
                 overlays.joinToString("\n").ifEmpty { null }
@@ -1195,6 +1214,8 @@ class RootDetector(private val context: Context) {
         val vbmetaState = getProp("ro.boot.vbmeta.device_state").lowercase()
         val verifiedBoot = getProp("ro.boot.verifiedbootstate").lowercase()
         val flashLocked = getProp("ro.boot.flash.locked").lowercase()
+        val warrantyBit = getProp("ro.boot.warranty_bit").lowercase().ifEmpty { getProp("ro.warranty_bit").lowercase() }
+        val secureBootLock = getProp("ro.secureboot.lockstate").lowercase()
 
         if (debuggable == "1" && secure == "1") {
             suspicious += "ro.debuggable=1 with ro.secure=1"
@@ -1210,6 +1231,12 @@ class RootDetector(private val context: Context) {
         }
         if ((verifiedBoot == "orange" || verifiedBoot == "yellow") && (flashLocked == "1" || vbmetaState == "locked")) {
             suspicious += "verified boot is $verifiedBoot while lock state looks locked"
+        }
+        if (warrantyBit == "1" && (flashLocked == "1" || vbmetaState == "locked")) {
+            suspicious += "warranty bit tripped while boot state looks locked"
+        }
+        if (secureBootLock == "unlocked" && flashLocked == "1") {
+            suspicious += "secureboot lockstate says unlocked while flash state says locked"
         }
 
         return listOf(
@@ -1230,7 +1257,9 @@ class RootDetector(private val context: Context) {
         val keywords = listOf(
             "shamiko", "trickystore", "playintegrityfix", "integrityfix", "safetynetfix",
             "safetynet-fix", "hidemyapplist", "hide my applist", "denylist", "deny-list",
-            "susfs", "nohello", "zygisk assistant", "zygiskassistant"
+            "susfs", "nohello", "zygisk assistant", "zygiskassistant",
+            "tricky-store", "magical overlayfs", "magisk overlayfs", "resetprop",
+            "zygisknext", "zygisk detach", "play integrity fix", "kernelpatch"
         )
         val scanFiles = listOf("module.prop", "service.sh", "post-fs-data.sh", "customize.sh", "action.sh", "system.prop", "sepolicy.rule")
         val moduleDirs = listOf("/data/adb/modules", "/data/adb/modules_update", "/metadata/adb/modules", "/mnt/.magisk/modules")

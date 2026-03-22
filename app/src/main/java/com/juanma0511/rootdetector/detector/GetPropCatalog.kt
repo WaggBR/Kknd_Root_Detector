@@ -16,15 +16,22 @@ object GetPropCatalog {
         PropValueCheck("ro.boot.veritymode", setOf("disabled", "logging")),
         PropValueCheck("ro.boot.flash.locked", setOf("0")),
         PropValueCheck("ro.boot.vbmeta.device_state", setOf("unlocked")),
-        PropValueCheck("ro.boot.verifiedbootstate", setOf("orange", "yellow"))
+        PropValueCheck("ro.boot.verifiedbootstate", setOf("orange", "yellow", "red")),
+        PropValueCheck("ro.boot.warranty_bit", setOf("1")),
+        PropValueCheck("ro.warranty_bit", setOf("1")),
+        PropValueCheck("ro.secureboot.lockstate", setOf("unlocked")),
+        PropValueCheck("vendor.boot.verifiedbootstate", setOf("orange", "yellow", "red")),
+        PropValueCheck("vendor.boot.vbmeta.device_state", setOf("unlocked"))
     )
 
     val spoofedBootProps = listOf(
         PropValueCheck("ro.boot.vbmeta.device_state", setOf("unlocked")),
-        PropValueCheck("ro.boot.verifiedbootstate", setOf("orange", "yellow")),
+        PropValueCheck("ro.boot.verifiedbootstate", setOf("orange", "yellow", "red")),
         PropValueCheck("ro.boot.flash.locked", setOf("0")),
         PropValueCheck("ro.boot.veritymode", setOf("disabled", "logging")),
-        PropValueCheck("ro.boot.warranty_bit", setOf("1"))
+        PropValueCheck("ro.boot.warranty_bit", setOf("1")),
+        PropValueCheck("ro.warranty_bit", setOf("1")),
+        PropValueCheck("ro.secureboot.lockstate", setOf("unlocked"))
     )
 
     val kernelSuProps = listOf(
@@ -33,7 +40,11 @@ object GetPropCatalog {
         "ro.kernelsu.version",
         "ro.boot.ksu.version",
         "ro.ksunext.version",
-        "ro.boot.ksunext.version"
+        "ro.boot.ksunext.version",
+        "persist.sys.kernelsu.version",
+        "persist.sys.ksu.version",
+        "ro.boot.apatch.version",
+        "ro.apatch.version"
     )
 
     val NLSoundProps = listOf(

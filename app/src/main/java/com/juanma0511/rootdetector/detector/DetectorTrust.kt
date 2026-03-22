@@ -18,12 +18,17 @@ object DetectorTrust {
         "magisk", "zygisk", "zygisknext", "zygiskassistant", "lsposed", "lspatch",
         "riru", "xposed", "edxp", "kernelsu", "ksu", "ksunext", "apatch",
         "shamiko", "susfs", "trickystore", "playintegrityfix", "integrityfix",
-        "safetynetfix", "hidemyapplist", "nohello", "frida", "frida-gadget"
+        "safetynetfix", "hidemyapplist", "nohello", "frida", "frida-gadget",
+        "magiskdelta", "kitsune", "resetprop", "denylist", "zygiskdetach",
+        "momo", "kernelpatch", "magicaloverlayfs", "overlayfs"
     )
 
     private val rootPaths = listOf(
         "/debug_ramdisk", "/.magisk", "/sbin/.magisk",
-        "/metadata/adb/modules", "/mnt/.magisk/modules"
+        "/metadata/adb/modules", "/mnt/.magisk/modules",
+        "/data/adb/lsposed", "/data/adb/riru", "/data/adb/tricky_store",
+        "/data/adb/trickystore", "/data/adb/shamiko", "/data/adb/denylist",
+        "/data/adb/modules", "/data/adb/modules_update"
     )
 
     fun frameworkKeywords(): List<String> = rootKeywords
