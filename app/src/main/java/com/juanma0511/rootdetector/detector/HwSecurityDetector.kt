@@ -34,13 +34,18 @@ class HwSecurityDetector(private val context: Context) {
             ::checkSecurityPatchLevel
         )
         val items = mutableListOf<HwCheckItem>()
-        val total = checks.size.coerceAtLeast(1)
+        val total = (checks.size + 3).coerceAtLeast(1)
         var done = 0
         fun tick() { done++; progressCallback((done * 100) / total) }
 
         checks.forEach { check ->
             items += check().also { tick() }
         }
+
+        val keyAttest = KeyAttestationChecker(context)
+        items += keyAttest.checkKeyAttestationChain(strongBox = false).also { tick() }
+        items += keyAttest.checkKeyAttestationChain(strongBox = true).also { tick() }
+        items += keyAttest.checkRootCertTrust().also { tick() }
 
         return items
     }
