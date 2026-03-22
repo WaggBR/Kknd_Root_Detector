@@ -16,13 +16,11 @@ android {
         versionName = "2.0"
         buildToolsVersion = "36.1.0"
 
-        ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
-        }
         externalNativeBuild {
             cmake {
                 cppFlags += "-std=c++17"
                 arguments += "-DANDROID_STL=c++_static"
+                arguments += "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
             }
         }
     }
@@ -34,12 +32,22 @@ android {
         }
     }
 
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a")
+            isUniversalApk = false
+        }
+    }
+
     buildTypes {
         debug {
             applicationIdSuffix = ".debug"
         }
         release {
             isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
@@ -48,7 +56,12 @@ android {
         val variant = this
         variant.outputs.all {
             val output = this as com.android.build.gradle.internal.api.BaseVariantOutputImpl
-            output.outputFileName = "RootDetector-${variant.versionName}-${variant.buildType.name}.apk"
+            val abiName = output.getFilter(com.android.build.OutputFile.ABI)
+            output.outputFileName = if (abiName.isNullOrBlank()) {
+                "RootDetector-${variant.versionName}-${variant.buildType.name}.apk"
+            } else {
+                "RootDetector-${variant.versionName}-${abiName}-${variant.buildType.name}.apk"
+            }
         }
     }
 
@@ -62,6 +75,12 @@ android {
     }
 
     buildFeatures { compose = true }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+    }
 }
 
 dependencies {

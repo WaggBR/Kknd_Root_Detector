@@ -16,3 +16,7 @@ target_compile_options(rootdetector PRIVATE
     -fstack-protector-all
     -O2
 )
+
+target_link_options(rootdetector PRIVATE
+    -Wl,-z,max-page-size=16384
+)
