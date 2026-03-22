@@ -21,16 +21,7 @@ class MountNamespaceDetector {
                     val mountPoint = parts[4]
                     val fileSystem = parts.getOrNull(sep + 1).orEmpty()
                     val source = parts.getOrNull(sep + 2).orEmpty()
-                    if (
-                        mountPoint.startsWith("/system") ||
-                        mountPoint.startsWith("/system_ext") ||
-                        mountPoint.startsWith("/vendor") ||
-                        mountPoint.startsWith("/product") ||
-                        mountPoint.startsWith("/odm") ||
-                        mountPoint.startsWith("/debug_ramdisk") ||
-                        mountPoint.startsWith("/.magisk") ||
-                        mountPoint.startsWith("/data/adb")
-                    ) {
+                    if (DetectorTrust.shouldTrackSensitiveMount(mountPoint)) {
                         result[mountPoint] = "$source [$fileSystem]"
                     }
                 }

@@ -277,9 +277,10 @@ class RootDetector(private val context: Context) {
 
     private fun checkWritablePaths(): List<DetectionItem> {
         val writable = linkedSetOf<String>()
+        val trustedLocked = bootLooksLockedAndNormal()
         val protectedPaths = listOf("/system", "/system_root", "/system_ext", "/vendor", "/product", "/odm")
         protectedPaths.forEach { path ->
-            if (runCatching { File(path).canWrite() }.getOrDefault(false)) {
+            if (!trustedLocked && runCatching { File(path).canWrite() }.getOrDefault(false)) {
                 writable += "$path (filesystem write access)"
             }
         }
@@ -291,9 +292,13 @@ class RootDetector(private val context: Context) {
                 val mountPoint = parts[1]
                 val fileSystem = parts[2]
                 val options = parts[3]
-                if (protectedPaths.any { mountPoint == it || mountPoint.startsWith("$it/") }) {
+                val exactProtectedMount = protectedPaths.contains(mountPoint)
+                val nestedProtectedMount = protectedPaths.any { mountPoint.startsWith("$it/") }
+                if (exactProtectedMount || nestedProtectedMount) {
                     val optionList = options.split(",")
-                    if (optionList.any { it == "rw" } || fileSystem == "overlay" || device.contains("tmpfs") || device.contains("overlay")) {
+                    val strongSignal = strongRootMountSignal("$device $fileSystem $options", mountPoint, trustedLocked)
+                    val writableLike = optionList.any { it == "rw" } || fileSystem == "overlay" || device.contains("tmpfs") || device.contains("overlay") || device.contains("loop")
+                    if (writableLike && ((!trustedLocked && exactProtectedMount) || strongSignal)) {
                         writable += "$mountPoint [$device $fileSystem $options]"
                     }
                 }
@@ -406,6 +411,7 @@ class RootDetector(private val context: Context) {
 
     private fun checkMountPoints(): List<DetectionItem> {
         val suspicious = linkedSetOf<String>()
+        val trustedLocked = bootLooksLockedAndNormal()
         val targets = listOf("/system", "/system_root", "/system_ext", "/vendor", "/product", "/odm")
         try {
             File("/proc/mounts").forEachLine { line ->
@@ -415,10 +421,13 @@ class RootDetector(private val context: Context) {
                 val mountPoint = parts[1]
                 val fileSystem = parts[2]
                 val options = parts[3]
-                val protectedMount = targets.any { mountPoint == it || mountPoint.startsWith("$it/") }
+                val exactProtectedMount = targets.contains(mountPoint)
+                val nestedProtectedMount = targets.any { mountPoint.startsWith("$it/") }
                 val writable = options.split(",").any { it == "rw" }
                 val suspiciousSource = device.startsWith("/dev/block/") || device.startsWith("dm-") || device.contains("overlay") || device.contains("tmpfs")
-                if (protectedMount && (writable || fileSystem == "overlay" || suspiciousSource && (device.contains("overlay") || device.contains("tmpfs")))) {
+                val strongSignal = strongRootMountSignal("$device $fileSystem $options", mountPoint, trustedLocked)
+                val suspiciousMount = writable || fileSystem == "overlay" || suspiciousSource && (device.contains("overlay") || device.contains("tmpfs") || device.contains("loop"))
+                if ((exactProtectedMount || nestedProtectedMount) && suspiciousMount && ((!trustedLocked && exactProtectedMount) || strongSignal)) {
                     suspicious += "$mountPoint [$device $fileSystem $options]"
                 }
             }
@@ -1107,16 +1116,7 @@ class RootDetector(private val context: Context) {
                     val mountPoint = parts[4]
                     val fileSystem = parts.getOrNull(sep + 1).orEmpty()
                     val source = parts.getOrNull(sep + 2).orEmpty()
-                    if (
-                        mountPoint.startsWith("/system") ||
-                        mountPoint.startsWith("/system_ext") ||
-                        mountPoint.startsWith("/vendor") ||
-                        mountPoint.startsWith("/product") ||
-                        mountPoint.startsWith("/odm") ||
-                        mountPoint.startsWith("/debug_ramdisk") ||
-                        mountPoint.startsWith("/.magisk") ||
-                        mountPoint.startsWith("/data/adb")
-                    ) {
+                    if (DetectorTrust.shouldTrackSensitiveMount(mountPoint)) {
                         result[mountPoint] = "$source [$fileSystem]"
                     }
                 }
@@ -1280,20 +1280,41 @@ class RootDetector(private val context: Context) {
         val romProps = mapOf(
             "ro.lineage.version"          to "LineageOS",
             "ro.lineage.build.version"    to "LineageOS",
+            "ro.lineage.device"           to "LineageOS",
             "ro.cm.version"               to "CyanogenMod",
             "ro.crdroid.version"          to "crDroid",
             "ro.evolution.version"        to "EvolutionX",
+            "ro.evox.version"             to "EvolutionX",
             "ro.arrow.version"            to "ArrowOS",
             "ro.havoc.version"            to "HavocOS",
             "ro.pe.version"               to "PixelExperience",
+            "ro.pixelexperience.version"  to "PixelExperience",
+            "org.pixelexperience.version" to "PixelExperience",
+            "ro.pixelos.version"          to "PixelOS",
+            "ro.yaap.version"             to "YAAP",
+            "ro.yaap.build.version"       to "YAAP",
             "ro.pa.version"               to "ParanoidAndroid",
             "ro.derp.version"             to "DerpFest",
             "ro.elixir.version"           to "ProjectElixir",
+            "ro.projectelixir.version"    to "ProjectElixir",
             "ro.potato.version"           to "POSP",
             "ro.superior.version"         to "SuperiorOS",
             "ro.spark.version"            to "SparkOS",
             "ro.bliss.version"            to "BlissROMs",
-            "ro.phhgsi.android.version"   to "PHH-GSI"
+            "ro.phhgsi.android.version"   to "PHH-GSI",
+            "ro.rising.version"           to "RisingOS",
+            "ro.rising.build.version"     to "RisingOS",
+            "ro.matrixx.version"          to "Project Matrixx",
+            "ro.nameless.version"         to "Nameless AOSP",
+            "ro.aicp.version"             to "AICP",
+            "ro.ancient.version"          to "AncientOS",
+            "ro.afterlife.version"        to "AfterLifeOS",
+            "ro.cherish.version"          to "CherishOS",
+            "ro.syberia.version"          to "SyberiaOS",
+            "ro.xtended.version"          to "Xtended",
+            "ro.dot.version"              to "DotOS",
+            "ro.awaken.version"           to "AwakenOS",
+            "ro.pixys.version"            to "PixysOS"
         )
 
         romProps.forEach { (prop, rom) ->
@@ -1301,20 +1322,79 @@ class RootDetector(private val context: Context) {
             if (v.isNotEmpty()) indicators += "$rom ($v)"
         }
 
-        val fp = android.os.Build.FINGERPRINT ?: ""
-        val brand = android.os.Build.BRAND ?: ""
-        if (fp.contains("lineage", ignoreCase = true)) indicators += "LineageOS in fingerprint"
-        if (fp.contains("evolution", ignoreCase = true)) indicators += "EvolutionX in fingerprint"
-        if (brand.equals("LineageOS", ignoreCase = true)) indicators += "Brand=LineageOS"
+        val buildFields = listOf(
+            "FINGERPRINT" to (android.os.Build.FINGERPRINT ?: ""),
+            "DISPLAY" to (android.os.Build.DISPLAY ?: ""),
+            "DESCRIPTION" to getProp("ro.build.description"),
+            "PRODUCT" to (android.os.Build.PRODUCT ?: ""),
+            "DEVICE" to (android.os.Build.DEVICE ?: ""),
+            "BRAND" to (android.os.Build.BRAND ?: ""),
+            "MANUFACTURER" to (android.os.Build.MANUFACTURER ?: "")
+        )
+        val romKeywords = mapOf(
+            "lineage" to "LineageOS",
+            "crdroid" to "crDroid",
+            "evolution" to "EvolutionX",
+            "evox" to "EvolutionX",
+            "pixelos" to "PixelOS",
+            "yaap" to "YAAP",
+            "pixel experience" to "PixelExperience",
+            "pixelexperience" to "PixelExperience",
+            "arrow" to "ArrowOS",
+            "havoc" to "HavocOS",
+            "derpfest" to "DerpFest",
+            "elixir" to "ProjectElixir",
+            "superior" to "SuperiorOS",
+            "spark" to "SparkOS",
+            "bliss" to "BlissROMs",
+            "rising" to "RisingOS",
+            "matrixx" to "Project Matrixx",
+            "nameless" to "Nameless AOSP",
+            "aicp" to "AICP",
+            "ancient" to "AncientOS",
+            "afterlife" to "AfterLifeOS",
+            "cherish" to "CherishOS",
+            "syberia" to "SyberiaOS",
+            "xtended" to "Xtended",
+            "dotos" to "DotOS",
+            "awaken" to "AwakenOS",
+            "pixys" to "PixysOS",
+            "phhgsi" to "PHH-GSI"
+        )
 
-        listOf("/system/etc/lineage-release", "/system/lineage").forEach { path ->
+        buildFields.forEach { (field, value) ->
+            val lower = value.lowercase()
+            romKeywords.forEach { (keyword, name) ->
+                if (lower.contains(keyword)) {
+                    indicators += "$name in $field"
+                }
+            }
+        }
+
+        runCatching {
+            val allProps = Runtime.getRuntime().exec("getprop").inputStream.bufferedReader().readText().lowercase()
+            romKeywords.forEach { (keyword, name) ->
+                if (allProps.contains(keyword)) {
+                    indicators += "$name in getprop"
+                }
+            }
+        }
+
+        listOf(
+            "/system/etc/lineage-release",
+            "/system/lineage",
+            "/system/etc/pixelos.version",
+            "/system/etc/yaap.version",
+            "/system/etc/crdroid.build",
+            "/system/etc/evolution.version"
+        ).forEach { path ->
             if (java.io.File(path).exists()) indicators += path
         }
 
         return listOf(det(
             "custom_rom", "Custom / Third-Party ROM", DetectionCategory.CUSTOM_ROM, Severity.MEDIUM,
-            "LineageOS, crDroid, EvolutionX, PixelExperience, ArrowOS and 10+ custom ROMs",
-            indicators.isNotEmpty(), indicators.joinToString("\n").ifEmpty { null }
+            "LineageOS, YAAP, PixelOS, PixelExperience, crDroid, EvolutionX and many other aftermarket ROM families",
+            indicators.isNotEmpty(), indicators.distinct().joinToString("\n").ifEmpty { null }
         ))
     }
 }

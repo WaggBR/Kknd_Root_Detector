@@ -5,6 +5,15 @@ import java.util.concurrent.TimeUnit
 
 object DetectorTrust {
 
+    private val directSystemMounts = setOf(
+        "/system", "/system_root", "/system_ext", "/vendor", "/product", "/odm"
+    )
+
+    private val stockVendorMountMarkers = listOf(
+        "oneplus", "oplus", "coloros", "heytap", "realme",
+        "my_product", "my_region", "my_company", "my_engineering", "my_stock"
+    )
+
     private val rootKeywords = listOf(
         "magisk", "zygisk", "zygisknext", "zygiskassistant", "lsposed", "lspatch",
         "riru", "xposed", "edxp", "kernelsu", "ksu", "ksunext", "apatch",
@@ -52,17 +61,30 @@ object DetectorTrust {
         return locked && greenBoot && verityOk && digestOk && bootKeyOk && !hasExplicitRootArtifacts()
     }
 
+    fun shouldTrackSensitiveMount(mountPoint: String): Boolean {
+        return mountPoint in directSystemMounts ||
+            mountPoint == "/debug_ramdisk" ||
+            mountPoint.startsWith("/.magisk") ||
+            mountPoint.startsWith("/data/adb")
+    }
+
+    fun isDirectSystemMount(mountPoint: String): Boolean = mountPoint in directSystemMounts
+
+    fun isLikelyStockVendorMount(signature: String, mountPoint: String): Boolean {
+        if (!isDirectSystemMount(mountPoint)) return false
+        val lower = ("$mountPoint $signature").lowercase()
+        if (rootPaths.any { lower.contains(it) } || rootKeywords.any { lower.contains(it) }) return false
+        if (stockVendorMountMarkers.any { lower.contains(it) }) return true
+        return Regex("""(^|[^a-z])my_[a-z0-9_]+""").containsMatchIn(lower)
+    }
+
     fun hasRootMountSignal(signature: String, mountPoint: String, trustedLocked: Boolean): Boolean {
         val lower = ("$mountPoint $signature").lowercase()
         if (isOplusMarker(lower)) return false
+        if (trustedLocked && isLikelyStockVendorMount(signature, mountPoint)) return false
         val keywordHit = rootPaths.any { lower.contains(it) } || rootKeywords.any { lower.contains(it) }
         if (keywordHit) return true
-        val systemPartition =
-            mountPoint.startsWith("/system") ||
-            mountPoint.startsWith("/system_ext") ||
-            mountPoint.startsWith("/vendor") ||
-            mountPoint.startsWith("/product") ||
-            mountPoint.startsWith("/odm")
+        val systemPartition = isDirectSystemMount(mountPoint)
         val mountAbuse = (lower.contains("overlay") || lower.contains("tmpfs") || lower.contains("loop")) && systemPartition
         return mountAbuse && !trustedLocked
     }
