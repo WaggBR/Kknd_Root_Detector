@@ -1,5 +1,7 @@
 package com.juanma0511.rootdetector.ui
 
+import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.clickable
@@ -48,14 +50,10 @@ fun SettingsScreen(
         SettingsSection(title = "About") {
             CreditsCard(
                 onGithubClick = {
-                    val intent = Intent(Intent.ACTION_VIEW,
-                        Uri.parse("https://github.com/juanma0511"))
-                    context.startActivity(intent)
+                    openExternalUrl(context, "https://github.com/juanma0511")
                 },
                 onOukaroGithubClick = {
-                    val intent = Intent(Intent.ACTION_VIEW,
-                        Uri.parse("https://github.com/OukaroMF"))
-                    context.startActivity(intent)
+                    openExternalUrl(context, "https://github.com/OukaroMF")
                 }
             )
         }
@@ -69,6 +67,25 @@ fun SettingsScreen(
             modifier = Modifier.fillMaxWidth(),
             textAlign = TextAlign.Center
         )
+    }
+}
+
+private fun openExternalUrl(context: Context, url: String) {
+    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+        addCategory(Intent.CATEGORY_BROWSABLE)
+        if (context !is Activity) {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+    }
+    val chooser = Intent.createChooser(intent, null).apply {
+        if (context !is Activity) {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+    }
+    runCatching {
+        if (intent.resolveActivity(context.packageManager) != null) {
+            context.startActivity(chooser)
+        }
     }
 }
 
